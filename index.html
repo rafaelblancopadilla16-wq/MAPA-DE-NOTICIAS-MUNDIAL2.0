@@ -1,0 +1,512 @@
+
+// ============================================
+// OPENEMAS WORLD NEWS — REAL NEWS ENGINE
+// GDELT DOC 2.0
+// ============================================
+
+const GDELT_API =
+  "https://api.gdeltproject.org/api/v2/doc/doc";
+
+// Optional: your own backend for AI summaries.
+// Never put private API keys in this public file.
+const SUMMARY_API_URL = "";
+
+// Country name adjustments for search.
+const countryAliases = {
+  "United States of America": "United States",
+  "Russian Federation": "Russia",
+  "Türkiye": "Turkey",
+  "Korea, Republic of": "South Korea",
+  "Democratic People's Republic of Korea": "North Korea",
+  "Iran (Islamic Republic of)": "Iran",
+  "Syrian Arab Republic": "Syria",
+  "Viet Nam": "Vietnam",
+  "Côte d'Ivoire": "Ivory Coast",
+  "Czechia": "Czech Republic"
+};
+
+// Categories: search terms used by GDELT.
+const categoryTerms = {
+  Politics: '(politics OR government OR election OR parliament)',
+  Economy: '(economy OR business OR trade OR inflation OR markets)',
+  Conflict: '(war OR conflict OR military OR attack OR security)',
+  Society: '(society OR protests OR education OR health)',
+  Science: '(science OR technology OR research OR innovation)',
+  Environment: '(climate OR environment OR pollution OR energy)'
+};
+
+let selectedCountry = null;
+let countryLayer = null;
+let selectedLayer = null;
+let countries = [];
+let currentRequest = 0;
+
+// ============================================
+// DATE UTILITIES
+// ============================================
+
+function formatGdeltDate(date, end = false) {
+  const compact = date.replaceAll("-", "");
+  return compact + (end ? "235959" : "000000");
+}
+
+function formatPublicationDate(value) {
+  if (!value) return "Date unavailable";
+
+  const match = value.match(
+    /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z?$/
+  );
+
+  if (!match) return value;
+
+  const [, year, month, day, hour, minute] = match;
+
+  return `${day}/${month}/${year} · ${hour}:${minute} UTC`;
+}
+
+function isWithinRecentWindow(date) {
+  const chosen = new Date(date + "T00:00:00Z");
+  const now = new Date();
+
+  const earliest = new Date(now);
+  earliest.setUTCMonth(earliest.getUTCMonth() - 3);
+
+  return chosen >= earliest && chosen <= now;
+}
+
+// ============================================
+// MAP
+// ============================================
+
+const map = L.map("map", {
+  center: [25, 0],
+  zoom: 2,
+  minZoom: 2,
+  maxZoom: 7
+});
+
+L.tileLayer(
+  "https://{s}.basemaps.cartocdn.com/light_nolabels/{z}/{x}/{y}{r}.png",
+  {
+    attribution:
+      '&copy; OpenStreetMap contributors &copy; CARTO'
+  }
+).addTo(map);
+
+function countryName(feature) {
+  const p = feature.properties || {};
+  return p.ADMIN || p.name || p.NAME || "Unknown";
+}
+
+function countryStyle() {
+  return {
+    color: "#fff",
+    weight: 0.7,
+    fillColor: "#78909c",
+    fillOpacity: 0.48
+  };
+}
+
+function selectCountry(name, layer) {
+  if (selectedLayer && countryLayer) {
+    countryLayer.resetStyle(selectedLayer);
+  }
+
+  selectedCountry = name;
+  selectedLayer = layer;
+
+  if (layer) {
+    layer.setStyle({
+      color: "#fff",
+      weight: 1.5,
+      fillColor: "#9b332d",
+      fillOpacity: 0.85
+    });
+
+    map.fitBounds(layer.getBounds(), {
+      padding: [25, 25],
+      maxZoom: 5
+    });
+  }
+
+  document.getElementById("selectedCountry").textContent = name;
+  document.getElementById("countrySearch").value = name;
+
+  loadRealNews();
+}
+
+// ============================================
+// LOAD COUNTRY BOUNDARIES
+// ============================================
+
+async function loadCountries() {
+  const url =
+    "https://raw.githubusercontent.com/datasets/geo-countries/master/data/countries.geojson";
+
+  try {
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error("Country data unavailable");
+    }
+
+    const geojson = await response.json();
+    countries = geojson.features;
+
+    countryLayer = L.geoJSON(geojson, {
+      style: countryStyle,
+
+      onEachFeature(feature, layer) {
+        const name = countryName(feature);
+
+        layer.bindTooltip(name);
+
+        layer.on("click", () => {
+          selectCountry(name, layer);
+        });
+
+        layer.on("mouseover", () => {
+          if (layer !== selectedLayer) {
+            layer.setStyle({
+              fillColor: "#b8a08d",
+              fillOpacity: 0.8
+            });
+          }
+        });
+
+        layer.on("mouseout", () => {
+          if (layer !== selectedLayer) {
+            countryLayer.resetStyle(layer);
+          }
+        });
+      }
+    }).addTo(map);
+
+    const datalist = document.getElementById("countryOptions");
+
+    datalist.innerHTML = countries
+      .map(countryName)
+      .filter(name => name !== "Unknown")
+      .sort()
+      .map(name =>
+        `<option value="${escapeHTML(name)}"></option>`
+      )
+      .join("");
+
+  } catch (error) {
+    console.error(error);
+    showMessage("The world map could not be loaded.");
+  }
+}
+
+// ============================================
+// SEARCH COUNTRY
+// ============================================
+
+function searchCountry() {
+  const query = document
+    .getElementById("countrySearch")
+    .value.trim().toLowerCase();
+
+  const feature = countries.find(item =>
+    countryName(item).toLowerCase() === query
+  );
+
+  if (!feature) {
+    showMessage("Please select a valid country.");
+    return;
+  }
+
+  let targetLayer = null;
+
+  countryLayer.eachLayer(layer => {
+    if (countryName(layer.feature) === countryName(feature)) {
+      targetLayer = layer;
+    }
+  });
+
+  if (targetLayer) {
+    selectCountry(countryName(feature), targetLayer);
+  }
+}
+
+// ============================================
+// HTML SECURITY
+// ============================================
+
+function escapeHTML(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
+function safeArticleURL(value) {
+  try {
+    const url = new URL(value);
+
+    if (url.protocol === "https:" || url.protocol === "http:") {
+      return escapeHTML(url.href);
+    }
+  } catch (error) {}
+
+  return "";
+}
+
+// ============================================
+// SEARCH REAL NEWS
+// ============================================
+
+async function loadRealNews() {
+  if (!selectedCountry) return;
+
+  const requestId = ++currentRequest;
+
+  const date = document.getElementById("newsDate").value;
+  const category = document.getElementById("category").value;
+
+  if (!date) {
+    showMessage("Please select a date.");
+    return;
+  }
+
+  document.getElementById("dateLabel").textContent = date;
+  document.getElementById("newsCount").textContent = "SEARCHING...";
+
+  showMessage("Searching real international news sources...");
+
+  if (!isWithinRecentWindow(date)) {
+    showMessage(
+      "GDELT's article search has a rolling window of approximately three months. This date is outside the supported period."
+    );
+    return;
+  }
+
+  const country =
+    countryAliases[selectedCountry] || selectedCountry;
+
+  const categoryQuery =
+    category === "all" ? "" : " " + categoryTerms[category];
+
+  const query = `"${country}"${categoryQuery}`;
+
+  const params = new URLSearchParams({
+    query,
+    mode: "ArtList",
+    format: "json",
+    maxrecords: "50",
+    sort: "HybridRel",
+    startdatetime: formatGdeltDate(date),
+    enddatetime: formatGdeltDate(date, true)
+  });
+
+  try {
+    const response = await fetch(
+      `${GDELT_API}?${params.toString()}`
+    );
+
+    if (!response.ok) {
+      throw new Error(
+        response.status === 429
+          ? "GDELT rate limit reached. Please wait before trying again."
+          : `GDELT returned HTTP ${response.status}`
+      );
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+
+    if (!contentType.includes("json")) {
+      throw new Error("The news service did not return valid JSON.");
+    }
+
+    const data = await response.json();
+
+    if (requestId !== currentRequest) return;
+
+    const articles = data.articles || [];
+
+    renderRealNews(articles, requestId);
+
+  } catch (error) {
+    if (requestId !== currentRequest) return;
+
+    console.error("Openemas news error:", error);
+
+    document.getElementById("newsCount").textContent = "ERROR";
+
+    showMessage(
+      "We could not retrieve the news right now. " + error.message
+    );
+  }
+}
+
+// ============================================
+// OPTIONAL EDITORIAL SUMMARY SERVICE
+// ============================================
+
+async function getEditorialSummary(article) {
+  if (!SUMMARY_API_URL) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(SUMMARY_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        title: article.title,
+        url: article.url,
+        source: article.domain
+      })
+    });
+
+    if (!response.ok) return null;
+
+    const result = await response.json();
+
+    return result.summary || null;
+
+  } catch (error) {
+    console.error("Summary service:", error);
+    return null;
+  }
+}
+
+// ============================================
+// DISPLAY REAL ARTICLES
+// ============================================
+
+async function renderRealNews(articles, requestId) {
+  const list = document.getElementById("newsList");
+
+  document.getElementById("newsCount").textContent =
+    articles.length + " ARTICLES";
+
+  if (!articles.length) {
+    showMessage(
+      "No matching articles were found for this country and date. Try another date or category."
+    );
+    return;
+  }
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const article of articles) {
+    const url = safeArticleURL(article.url);
+    const title = (article.title || "").trim();
+
+    if (!url || !title) continue;
+
+    const key = url.toLowerCase();
+
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    unique.push(article);
+  }
+
+  list.innerHTML = "";
+
+  if (!unique.length) {
+    showMessage("No valid article links were returned.");
+    return;
+  }
+
+  for (const article of unique) {
+    if (requestId !== currentRequest) return;
+
+    const articleURL = safeArticleURL(article.url);
+    const title = escapeHTML(article.title);
+    const source = escapeHTML(article.domain || "Source unavailable");
+    const published = formatPublicationDate(article.seendate);
+
+    const item = document.createElement("article");
+    item.className = "news-item";
+
+    item.innerHTML = `
+      <div class="news-category">ORIGINAL NEWS REPORT</div>
+
+      <h3>${title}</h3>
+
+      <div class="news-footer">
+        <span>${source}</span>
+        <span>${escapeHTML(published)}</span>
+      </div>
+
+      <p class="editorial-summary">
+        <strong>EDITORIAL SUMMARY:</strong>
+        <span class="summary-text">
+          Summary pending editorial processing.
+          No summary has been generated or verified yet.
+        </span>
+      </p>
+
+      <div class="news-footer">
+        <span>Original publication</span>
+        <a href="${articleURL}"
+           target="_blank"
+           rel="noopener noreferrer">
+          READ ORIGINAL ARTICLE ↗
+        </a>
+      </div>
+    `;
+
+    list.appendChild(item);
+
+    // Only populate this field when a real summary
+    // service has been configured on your backend.
+    const summary = await getEditorialSummary(article);
+
+    if (requestId !== currentRequest) return;
+
+    if (summary) {
+      const summaryElement = item.querySelector(".summary-text");
+      summaryElement.textContent = summary;
+    }
+  }
+
+  document.getElementById("dataNotice").textContent =
+    "News results supplied by GDELT DOC 2.0. Headlines and article links belong to their original publishers. Editorial summaries are shown only when generated by the configured summary service.";
+}
+
+// ============================================
+// INTERFACE HELPERS
+// ============================================
+
+function showMessage(message) {
+  document.getElementById("newsList").innerHTML = `
+    <div class="empty">${escapeHTML(message)}</div>
+  `;
+
+  document.getElementById("newsCount").textContent = "—";
+}
+
+// ============================================
+// EVENTS
+// ============================================
+
+document.getElementById("searchButton")
+  .addEventListener("click", searchCountry);
+
+document.getElementById("countrySearch")
+  .addEventListener("keydown", event => {
+    if (event.key === "Enter") searchCountry();
+  });
+
+document.getElementById("category")
+  .addEventListener("change", loadRealNews);
+
+document.getElementById("newsDate")
+  .addEventListener("change", loadRealNews);
+
+// ============================================
+// START
+// ============================================
+
+loadCountries();
